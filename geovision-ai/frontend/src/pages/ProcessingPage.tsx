@@ -72,7 +72,7 @@ export const ProcessingPage: React.FC = () => {
       } catch (err: any) {
         console.error('Status check error:', err);
       }
-    }, 1500);
+    }, 600);
 
     return () => clearInterval(interval);
   }, [activeJobId, jobStatus]);
@@ -260,7 +260,7 @@ export const ProcessingPage: React.FC = () => {
             {/* Inference Hardware HUD */}
             <div className="p-3 rounded-xl bg-[#060913] border border-slate-800 flex items-center justify-between text-xs font-mono">
               <span className="text-slate-400">Inference Hardware Acceleration:</span>
-              <span className="text-emerald-400 font-semibold">Active &bull; Overlapping Tile Engine (128px)</span>
+              <span className="text-emerald-400 font-semibold">Active &bull; High-Speed Batched Inference (Multi-threaded)</span>
             </div>
 
             {/* Start Button */}

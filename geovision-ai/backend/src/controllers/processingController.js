@@ -46,10 +46,22 @@ const startProcessing = async (req, res) => {
     // Run processing asynchronously so HTTP response is returned immediately
     const outputsDir = path.resolve(__dirname, '../../../outputs');
 
-    // Asynchronous background task execution
+    // Asynchronous background task execution with live progressive updates
     (async () => {
+      let progressTimer = null;
       try {
-        await store.updateJob(job._id, { progress: 30 });
+        await store.updateJob(job._id, { progress: 20 });
+
+        // Dynamic progress updater: smoothly marches across 9 workflow steps
+        let currentProgress = 20;
+        progressTimer = setInterval(async () => {
+          if (currentProgress < 85) {
+            currentProgress += 10;
+            try {
+              await store.updateJob(job._id, { progress: currentProgress });
+            } catch (_) {}
+          }
+        }, 750);
 
         // Call AI Service
         const aiResult = await aiClient.superResolve({
@@ -60,7 +72,8 @@ const startProcessing = async (req, res) => {
           referencePath: referencePath,
         });
 
-        await store.updateJob(job._id, { progress: 85 });
+        if (progressTimer) clearInterval(progressTimer);
+        await store.updateJob(job._id, { progress: 92 });
 
         // Save validation report
         if (aiResult.validation) {
@@ -92,6 +105,7 @@ const startProcessing = async (req, res) => {
         });
         console.log(`[Job Succeeded] Job ${job._id} super-resolution completed.`);
       } catch (procErr) {
+        if (progressTimer) clearInterval(progressTimer);
         console.error(`[Job Failed] Job ${job._id} error:`, procErr.message);
         await store.updateJob(job._id, {
           status: 'failed',

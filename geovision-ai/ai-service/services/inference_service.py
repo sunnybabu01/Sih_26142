@@ -20,7 +20,9 @@ class InferenceService:
     def __init__(self, checkpoints_dir: str = "checkpoints"):
         self.checkpoints_dir = checkpoints_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[GeoVision AI] Initialized InferenceService on device: {self.device}")
+        num_threads = min(8, os.cpu_count() or 4)
+        torch.set_num_threads(num_threads)
+        print(f"[GeoVision AI] Initialized InferenceService on device: {self.device} (CPU threads: {num_threads})")
         self.models: Dict[str, SRMNet] = {}
         self._init_models()
 
@@ -34,7 +36,7 @@ class InferenceService:
             ckpt_path = os.path.join(self.checkpoints_dir, f"{model_key}.pth")
             if os.path.exists(ckpt_path):
                 try:
-                    checkpoint = torch.load(ckpt_path, map_location=self.device)
+                    checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
                     model.load_state_dict(checkpoint["model_state_dict"])
                     print(f"[GeoVision AI] Loaded trained weights from {ckpt_path}")
                 except Exception as e:
@@ -108,15 +110,12 @@ class InferenceService:
         c, h, w = raw_data.shape
         processing_data = raw_data[:3] if c >= 3 else np.repeat(raw_data, 3, axis=0)
 
-        # Step 2: Extract overlapping tiles
-        print(f"[GeoVision AI] Extracting tiles (size={tile_size}, overlap={tile_overlap}) from {h}x{w} scene...")
-        tiles, coords, (orig_h, orig_w) = extract_tiles(
-            processing_data, tile_size=tile_size, overlap=tile_overlap
-        )
-        total_tiles = len(tiles)
-        print(f"[GeoVision AI] Total tiles to process: {total_tiles}")
+        # Step 2: Extract overlapping tiles (with high-speed adaptive tiling)
+        # For scenes <= 256px, a single forward pass without tiling is instantaneous.
+        # For 512px scenes, tile_size=256 reduces tile count from 25 down to 4.
+        effective_tile_size = max(tile_size, 256) if (h >= 256 or w >= 256) else min(tile_size, max(h, w))
+        effective_overlap = min(tile_overlap, 32)
 
-        # Step 3: PyTorch Model Inference
         model_key = f"srmnet_x{scale_factor}"
         if model_key not in self.models:
             model_key = "srmnet_x4"
@@ -124,23 +123,41 @@ class InferenceService:
 
         model = self.models[model_key]
 
-        super_resolved_tiles = []
-        with torch.no_grad():
-            for idx, tile in enumerate(tiles):
-                # Shape (1, C, H, W)
-                tensor_in = torch.from_numpy(tile).unsqueeze(0).to(self.device)
+        if h <= 256 and w <= 256:
+            print(f"[GeoVision AI] Scene is {h}x{w}: running direct full-scene accelerated inference...")
+            with torch.no_grad():
+                tensor_in = torch.from_numpy(processing_data).unsqueeze(0).to(self.device)
                 tensor_out = model(tensor_in)
-                tile_sr = tensor_out.squeeze(0).cpu().numpy()
-                super_resolved_tiles.append(tile_sr)
+                stitched = tensor_out.squeeze(0).cpu().numpy()
+                stitched = np.clip(stitched, 0.0, 1.0)
+        else:
+            print(f"[GeoVision AI] Extracting tiles (size={effective_tile_size}, overlap={effective_overlap}) from {h}x{w} scene...")
+            tiles, coords, (orig_h, orig_w) = extract_tiles(
+                processing_data, tile_size=effective_tile_size, overlap=effective_overlap
+            )
+            total_tiles = len(tiles)
+            print(f"[GeoVision AI] Processing {total_tiles} tiles using batched multi-threaded inference...")
 
-        # Step 4: Tile Stitching
-        print(f"[GeoVision AI] Stitching {total_tiles} super-resolved tiles...")
-        stitched = stitch_tiles(
-            super_resolved_tiles,
-            coords,
-            target_shape=(orig_h, orig_w),
-            scale_factor=scale_factor
-        )
+            super_resolved_tiles = []
+            batch_size = 4
+            with torch.no_grad():
+                for i in range(0, len(tiles), batch_size):
+                    chunk = tiles[i:i + batch_size]
+                    batch_arr = np.stack(chunk)
+                    tensor_in = torch.from_numpy(batch_arr).to(self.device)
+                    tensor_out = model(tensor_in)
+                    batch_out = tensor_out.cpu().numpy()
+                    for b_idx in range(batch_out.shape[0]):
+                        super_resolved_tiles.append(batch_out[b_idx])
+
+            # Step 4: Tile Stitching
+            print(f"[GeoVision AI] Stitching {total_tiles} super-resolved tiles with Hann window blending...")
+            stitched = stitch_tiles(
+                super_resolved_tiles,
+                coords,
+                target_shape=(orig_h, orig_w),
+                scale_factor=scale_factor
+            )
 
         # Step 5: GeoTIFF & Preview PNG Export
         out_geotiff_path = os.path.join(output_dir, f"{job_id}_enhanced_x{scale_factor}.tif")

@@ -97,7 +97,7 @@ const aiClient = {
           output_dir: path.resolve(outputDir),
           scale_factor: scaleFactor,
           reference_path: referencePath ? path.resolve(referencePath) : null,
-          tile_size: 128,
+          tile_size: 256,
           tile_overlap: 32,
         },
         { timeout: 120000 } // 2 min timeout for full deep learning inference
